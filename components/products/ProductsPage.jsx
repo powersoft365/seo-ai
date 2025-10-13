@@ -97,7 +97,9 @@ import Spinner from "@/components/ui/Spinner";
 import { fetchTokenDedux } from "@/lib/redux/slices/tokenDeduxSlice";
 import { fetchUserToken } from "@/lib/redux/slices/userTokenSlice";
 import Pricing from "../sections/Pricing";
-
+// ✅ NEW: Import JSZip and file-saver
+import JSZip from "jszip";
+import { saveAs } from "file-saver";
 /* -------------------- local utils -------------------- */
 const deepCopy = (obj) => JSON.parse(JSON.stringify(obj));
 function humanSize(bytes = 0) {
@@ -134,7 +136,6 @@ function prettyCaption(key) {
     .replace(/^./, (c) => c.toUpperCase())
     .trim();
 }
-
 /* ======================= NEW: simple localStorage helpers ======================= */
 const STORAGE_KEYS = {
   rows: "products_csv_rows",
@@ -161,7 +162,6 @@ function safeRemoveItem(key) {
     window.localStorage.removeItem(key);
   } catch {}
 }
-
 /* ======================= Reusable Components ======================= */
 const SectionCard = ({ title, description, children, className = "" }) => (
   <Card className={`mb-6 ${className}`}>
@@ -219,7 +219,6 @@ const StatusBadge = ({ children, variant = "default" }) => (
     {children}
   </Badge>
 );
-
 /* ======================= Column Selection Dropdowns ======================= */
 function ColumnDropdownSingle({ label, value, options, onSelect, icon: Icon }) {
   const [open, setOpen] = React.useState(false);
@@ -492,11 +491,11 @@ function ColumnDropdownMulti({
     </div>
   );
 }
-
 /* ======================= PAGE ======================= */
 export default function ProductsPage() {
   const { CSVReader } = useCSVReader();
   const dispatch = useAppDispatch();
+  const [uploading, setUploading] = useState(false);
   React.useEffect(() => {
     dispatch(fetchTokenDedux());
   }, [dispatch]);
@@ -524,7 +523,6 @@ export default function ProductsPage() {
     () => rows.some((r) => String(r?.barcode ?? "").trim().length > 0),
     [rows]
   );
-
   /* ---------- broken-image tracking ---------- */
   const [badUrls, setBadUrls] = React.useState(new Set());
   const markBroken = (u) =>
@@ -534,7 +532,6 @@ export default function ProductsPage() {
       next.add(u);
       return next;
     });
-
   /* ---------- columns ---------- */
   const availableColumns = React.useMemo(() => {
     const allKeys = new Set();
@@ -568,7 +565,6 @@ export default function ProductsPage() {
     [availableColumns]
   );
   const showBarcodeCol = hasAnyBarcodes;
-
   /* ---------- defaults & smart fallbacks ---------- */
   React.useEffect(() => {
     if (!seoSourceCols.length && availableColumns.length) {
@@ -612,7 +608,6 @@ export default function ProductsPage() {
     hasAnyBarcodes,
     pickFallbackBase,
   ]);
-
   /* ---------- toggle show only selected ---------- */
   const [showOnlySelected, setShowOnlySelected] = React.useState(false);
   const filteredRows = React.useMemo(() => {
@@ -622,7 +617,6 @@ export default function ProductsPage() {
     }
     return rows;
   }, [rows, selected, showOnlySelected]);
-
   /* ---------- customize / picker ---------- */
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [pickerScopeId, setPickerScopeId] = React.useState(null);
@@ -633,29 +627,14 @@ export default function ProductsPage() {
     ).filter((r) => Array.isArray(imagesById[r.id]) && imagesById[r.id].length);
     return list;
   }, [rows, imagesById, pickerScopeId]);
+  // ✅ Tracks which products are included in the modal AND controls product-level select-all for images
   const [modalSelectedProductIds, setModalSelectedProductIds] = React.useState(
     new Set()
   );
-  // NEW: State to track the count of selected images
-  const [selectedImagesCount, setSelectedImagesCount] = React.useState(0);
   React.useEffect(() => {
     if (pickerOpen) {
       const ids = new Set(productsWithImages.map((p) => p.id));
       setModalSelectedProductIds(ids);
-      // NEW: Initialize selectedImagesCount based on the current state
-      let count = 0;
-      productsWithImages.forEach((product) => {
-        const urls = (imagesById[product.id] || []).filter(
-          (u) => !badUrls.has(u)
-        );
-        const chosen = (selectedImagesById[product.id] || []).filter(
-          (u) => !badUrls.has(u)
-        );
-        if (modalSelectedProductIds.has(product.id)) {
-          count += chosen.length;
-        }
-      });
-      setSelectedImagesCount(count);
       if (filenameBaseField === "barcode" && !hasAnyBarcodes) {
         dispatch(
           productsSlice.actions.setFilenameBaseField(pickFallbackBase())
@@ -681,90 +660,39 @@ export default function ProductsPage() {
     setPickerOpen(v);
     if (!v) setPickerScopeId(null);
   };
-
-  // ✅ NEW: Toggle all products AND their images
-  const toggleAllProductsInModal = (checked) => {
-    if (checked) {
-      const ids = new Set(productsWithImages.map((p) => p.id));
-      setModalSelectedProductIds(ids);
-      // NEW: When selecting all products, also select all their images
-      let count = 0;
-      productsWithImages.forEach((rec) => {
-        const urls = (imagesById[rec.id] || []).filter((u) => !badUrls.has(u));
-        urls.forEach((u) => {
-          dispatch(
-            productsSlice.actions.toggleSelectImage({
-              id: rec.id,
-              url: u,
-              checked: true,
-            })
-          );
-        });
-        count += urls.length; // Add all images for this product
-      });
-      setSelectedImagesCount(count);
-    } else {
-      setModalSelectedProductIds(new Set());
-      // NEW: When deselecting all products, also deselect all their images
-      productsWithImages.forEach((rec) => {
-        const urls = (imagesById[rec.id] || []).filter((u) => !badUrls.has(u));
-        urls.forEach((u) => {
-          dispatch(
-            productsSlice.actions.toggleSelectImage({
-              id: rec.id,
-              url: u,
-              checked: false,
-            })
-          );
-        });
-      });
-      setSelectedImagesCount(0);
-    }
-  };
-
-  // ✅ NEW: Function to update selectedImagesCount whenever modalSelectedProductIds or selectedImagesById changes
-  const updateSelectedImagesCount = React.useCallback(() => {
-    let count = 0;
-    productsWithImages.forEach((product) => {
-      const urls = (imagesById[product.id] || []).filter(
-        (u) => !badUrls.has(u)
-      );
-      const chosen = (selectedImagesById[product.id] || []).filter(
-        (u) => !badUrls.has(u)
-      );
-      if (modalSelectedProductIds.has(product.id)) {
-        count += chosen.length;
-      }
-    });
-    setSelectedImagesCount(count);
-  }, [
-    productsWithImages,
-    selectedImagesById,
-    modalSelectedProductIds,
-    badUrls,
-  ]);
-  React.useEffect(() => {
-    updateSelectedImagesCount();
-  }, [updateSelectedImagesCount]);
-
-  // ✅ NEW: Memoized download selections based on selectedImagesCount
+  /* ---------- selection helpers for modal ---------- */
   const downloadSelections = React.useMemo(() => {
-    if (!productsWithImages.length) return [];
-    if (selectedImagesCount === 0) return [];
-    return allDownloadSelections.filter(
-      (f) =>
-        modalSelectedProductIds.has(f.id) &&
-        selectedImagesById[f.id]?.some((url) => !badUrls.has(url))
-    );
-  }, [
-    allDownloadSelections,
-    modalSelectedProductIds,
-    selectedImagesById,
-    badUrls,
-    productsWithImages,
-    selectedImagesCount,
-  ]);
+    const selections = [];
 
+    if (!selectedImagesById || !rows) return selections;
+
+    for (const productId in selectedImagesById) {
+      const product = rows.find((r) => String(r.id) === String(productId));
+      if (!product) continue;
+
+      const baseName =
+        makeBaseName(product, filenameBaseField) || String(product.id);
+      const validUrls = selectedImagesById[productId].filter(
+        (url) => !badUrls.has(url)
+      );
+
+      validUrls.forEach((url, index) => {
+        const ext = inferExt(url);
+        const filename =
+          index === 0
+            ? `${baseName}${ext}`
+            : `${baseName}${filenameSeparator}${index}${ext}`;
+        selections.push({ id: product.id, filename, url });
+      });
+    }
+
+    return selections;
+  }, [selectedImagesById, rows, filenameBaseField, filenameSeparator, badUrls]);
+
+  const selectedImagesCount = React.useMemo(
+    () => downloadSelections.length,
+    [downloadSelections]
+  );
   /* ---------- preview modal ---------- */
   const [previewOpen, setPreviewOpen] = React.useState(false);
   const [previewProductId, setPreviewProductId] = React.useState(null);
@@ -813,7 +741,6 @@ export default function ProductsPage() {
     if (!currentUrls.length) return;
     setPreviewIndex((i) => (i + 1) % currentUrls.length);
   };
-
   /* ---------- preview names ---------- */
   const previewBaseName = React.useMemo(() => {
     if (!currentProduct) return "";
@@ -835,7 +762,6 @@ export default function ProductsPage() {
     const ext = inferExt(currentUrl);
     return `${previewBaseName}${ext}`;
   }, [previewBaseName, currentUrl]);
-
   /* ---------- grid ---------- */
   const gridRef = React.useRef(null);
   const dataSource = React.useMemo(
@@ -850,29 +776,59 @@ export default function ProductsPage() {
     const ids = new Set(visibleRows.map((vr) => vr.data?.id).filter(Boolean));
     setVisibleRowIds(ids);
   }, []);
-
   /* ---------- upload ---------- */
   const onUpload = React.useCallback(
     (results, file) => {
-      const { rows: withIds } = parseCsvResultsToRows(results);
-      dispatch(productsSlice.actions.setRows(deepCopy(withIds)));
-      dispatch(
-        productsSlice.actions.setAcceptedInfo({
-          name: file?.name,
+      const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB in bytes
+      if (file && file.size > MAX_FILE_SIZE) {
+        toast.error(
+          "File size must not exceed 20 MB. Please select a file under 20 MB.",
+          {
+            style: {
+              backgroundColor: "#ef4444",
+              color: "white",
+            },
+          }
+        );
+        return;
+      }
+      const uploadToast = toast.loading("Uploading and processing CSV file...");
+      setUploading(true);
+      try {
+        const { rows: withIds } = parseCsvResultsToRows(results);
+        dispatch(productsSlice.actions.setRows(deepCopy(withIds)));
+        dispatch(
+          productsSlice.actions.setAcceptedInfo({
+            name: file?.name,
+            size: file?.size || 0,
+          })
+        );
+        dispatch(productsSlice.actions.setProgress({ total: 0, completed: 0 }));
+        safeSetItem(STORAGE_KEYS.rows, withIds);
+        safeSetItem(STORAGE_KEYS.info, {
+          name: file?.name || "uploaded.csv",
           size: file?.size || 0,
-        })
-      );
-      dispatch(productsSlice.actions.setProgress({ total: 0, completed: 0 }));
-      safeSetItem(STORAGE_KEYS.rows, withIds);
-      safeSetItem(STORAGE_KEYS.info, {
-        name: file?.name || "uploaded.csv",
-        size: file?.size || 0,
-      });
-      toast.success("CSV loaded successfully");
+        });
+        toast.success("CSV loaded successfully", {
+          id: uploadToast,
+        });
+      } catch (error) {
+        toast.error(
+          "Failed to process CSV file. Please try again with a smaller file.",
+          {
+            id: uploadToast,
+            style: {
+              backgroundColor: "#ef4444",
+              color: "white",
+            },
+          }
+        );
+      } finally {
+        setUploading(false);
+      }
     },
     [dispatch]
   );
-
   /* ---------- CRUD ---------- */
   const onRowInserted = React.useCallback(
     (e) => {
@@ -907,7 +863,6 @@ export default function ProductsPage() {
     },
     [dispatch]
   );
-
   /* ---------- image fetch ---------- */
   const guardBarcode = () => {
     if (
@@ -915,7 +870,13 @@ export default function ProductsPage() {
       (imageQueryField === "barcode" && !hasAnyBarcodes)
     ) {
       toast.error(
-        "No barcodes found. Please choose a different 'Search by' column."
+        "No barcodes found. Please choose a different 'Search by' column.",
+        {
+          style: {
+            backgroundColor: "#ef4444",
+            color: "white",
+          },
+        }
       );
       return false;
     }
@@ -928,7 +889,12 @@ export default function ProductsPage() {
       ).unwrap();
       toast.success("Images generated successfully");
     } catch (e) {
-      toast.error(`Failed to generate images: ${e?.message || e}`);
+      toast.error(`Failed to generate images: ${e?.message || e}`, {
+        style: {
+          backgroundColor: "#ef4444",
+          color: "white",
+        },
+      });
     }
   };
   const loadAllImages = React.useCallback(
@@ -1012,7 +978,6 @@ export default function ProductsPage() {
     },
     [selected, imageQueryField, hasAnyBarcodes]
   );
-
   /* ---------- selection helpers ---------- */
   const selectAll = React.useCallback(() => {
     const allIds = filteredRows.map((r) => r.id);
@@ -1029,10 +994,9 @@ export default function ProductsPage() {
     filteredRows.every((r) => selected.includes(r.id));
   const someRowsChecked =
     !allRowsChecked && filteredRows.some((r) => selected.includes(r.id));
-
   /* ---------- token configs & wallet ---------- */
   const {
-    tokenDeduxDoc,
+    data: tokenDeduxDoc,
     loading: status,
     error: rr,
   } = useSelector((state) => state.tokenDedux);
@@ -1100,7 +1064,6 @@ export default function ProductsPage() {
       estimated_for_images.total_products,
       walletAvailable,
     ]);
-
   /* ---------- SEO actions ---------- */
   const runGenerateSEOForIds = React.useCallback(
     async (ids) => {
@@ -1110,7 +1073,12 @@ export default function ProductsPage() {
         toast.success("SEO generated successfully");
         dispatch(fetchUserToken());
       } catch (e) {
-        toast.error(`Failed to generate SEO: ${e?.message || e}`);
+        toast.error(`Failed to generate SEO: ${e?.message || e}`, {
+          style: {
+            backgroundColor: "#ef4444",
+            color: "white",
+          },
+        });
       }
     },
     [dispatch]
@@ -1120,7 +1088,12 @@ export default function ProductsPage() {
       const productsCount = ids.length;
       if (!productsCount) return;
       if (!seoTargets || !seoTargets.length) {
-        toast.error("Select at least one SEO field to generate.");
+        toast.error("Select at least one SEO field to generate.", {
+          style: {
+            backgroundColor: "#ef4444",
+            color: "white",
+          },
+        });
         return;
       }
       setEstimated_for_seo({
@@ -1161,7 +1134,6 @@ export default function ProductsPage() {
       toast.dismiss();
     }
   }, [isProcessing]);
-
   /* ---------- export helpers ---------- */
   const getSeoRows = React.useCallback(() => {
     return rows.map((r) => ({
@@ -1222,7 +1194,12 @@ export default function ProductsPage() {
       XLSX.utils.book_append_sheet(wb, ws, "SEO");
       XLSX.writeFile(wb, "seo-data.xlsx");
     } catch (e) {
-      toast.error("Failed to export XLSX. Make sure 'xlsx' is installed.");
+      toast.error("Failed to export XLSX. Make sure 'xlsx' is installed.", {
+        style: {
+          backgroundColor: "#ef4444",
+          color: "white",
+        },
+      });
     }
   }, [getSeoRows]);
   const exportDOCX = React.useCallback(async () => {
@@ -1286,45 +1263,65 @@ export default function ProductsPage() {
           },
         ],
       });
-      const { saveAs } = await import("file-saver");
       const blob = await Packer.toBlob(doc);
       saveAs(blob, "seo-data.docx");
     } catch (e) {
       console.error(e);
-      toast.error("Failed to export DOCX. Make sure 'docx' is installed.");
+      toast.error("Failed to export DOCX. Make sure 'docx' is installed.", {
+        style: {
+          backgroundColor: "#ef4444",
+          color: "white",
+        },
+      });
     }
   }, [getSeoRows]);
   const downloadSeoCsv = exportCSV;
-
-  /* ---------- ZIP posting ---------- */
-  const postZip = React.useCallback(async (files) => {
-    const res = await fetch("/api/images-zip", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ files }),
-    });
-    if (!res.ok) throw new Error(`Zip failed: ${res.status}`);
-    return res.blob();
-  }, []);
+  // ✅ NEW: Client-side ZIP download
   const downloadSelectedImages = React.useCallback(async () => {
     if (!downloadSelections.length || zipLoading) return;
     setZipLoading(true);
     try {
-      const FileSaver = await import("file-saver");
-      const saveAs = FileSaver?.default || FileSaver?.saveAs;
-      if (typeof saveAs !== "function") throw new Error("saveAs not available");
-      const blob = await postZip(downloadSelections);
-      saveAs(
-        blob,
-        `product-images-${new Date().toISOString().slice(0, 10)}.zip`
-      );
+      const zip = new JSZip();
+      const batchSize = 10; // Process in batches to avoid overwhelming the browser
+      for (let i = 0; i < downloadSelections.length; i += batchSize) {
+        const batch = downloadSelections.slice(i, i + batchSize);
+        await Promise.all(
+          batch.map(async (item) => {
+            try {
+              const response = await fetch(
+                `/api/images-zip?url=${encodeURIComponent(item.url)}`
+              );
+              if (!response.ok) {
+                console.warn(`Skipping image ${item.url}: ${response.status}`);
+                return;
+              }
+              const blob = await response.blob();
+              zip.file(item.filename, blob);
+            } catch (err) {
+              console.warn(
+                `Failed to add image ${item.url} to ZIP:`,
+                err.message
+              );
+            }
+          })
+        );
+      }
+      const content = await zip.generateAsync({ type: "blob" });
+      const dateStr = new Date().toISOString().slice(0, 10);
+      saveAs(content, `product-images-${dateStr}.zip`);
       toast.success("Images archived and downloading…");
     } catch (err) {
-      toast.error(`Download failed: ${err?.message || err}`);
+      console.error("ZIP download failed:", err);
+      toast.error(`Download failed: ${err?.message || err}`, {
+        style: {
+          backgroundColor: "#ef4444",
+          color: "white",
+        },
+      });
     } finally {
       setZipLoading(false);
     }
-  }, [downloadSelections, zipLoading, postZip]);
+  }, [downloadSelections, zipLoading]);
   const downloadCurrentPreview = React.useCallback(async () => {
     if (!currentUrl || !currentProduct) return;
     setSingleDownloading(true);
@@ -1348,12 +1345,16 @@ export default function ProductsPage() {
       window.URL.revokeObjectURL(url);
       toast.success("Image downloaded");
     } catch (e) {
-      toast.error(`Download failed: ${e?.message || e}`);
+      toast.error(`Download failed: ${e?.message || e}`, {
+        style: {
+          backgroundColor: "#ef4444",
+          color: "white",
+        },
+      });
     } finally {
       setSingleDownloading(false);
     }
   }, [currentUrl, currentProduct, previewDownloadName]);
-
   /* ---------- file chip ---------- */
   const FileChip = React.useCallback(
     () =>
@@ -1380,7 +1381,6 @@ export default function ProductsPage() {
       ) : null,
     [acceptedInfo, dispatch]
   );
-
   /* --------- preview helpers --------- */
   const displayUrls = React.useMemo(
     () => (currentUrls || []).filter((u) => !badUrls.has(u)),
@@ -1391,7 +1391,6 @@ export default function ProductsPage() {
     Math.max(0, displayUrls.length - 1)
   );
   const safeUrl = displayUrls[safeIndex];
-
   /* ---------- grid image cell ---------- */
   const ImageCell = ({ data }) => {
     // ✅ Only render if row is currently visible
@@ -1762,7 +1761,6 @@ export default function ProductsPage() {
       </SectionCard>
     );
   };
-
   /* ---------- NEW: restore from localStorage on first mount ---------- */
   useEffect(() => {
     if (acceptedInfo || (rows && rows.length > 0)) return;
@@ -1798,7 +1796,38 @@ export default function ProductsPage() {
       setShowOnlySelected(false);
     }
   }, [selected]);
-
+  // ✅ This toggles all images of a single product
+  const toggleAllImagesForProduct = React.useCallback(
+    (rec, checked) => {
+      const urls = (imagesById[rec.id] || []).filter((u) => !badUrls.has(u));
+      const chosen = (selectedImagesById[rec.id] || []).filter(
+        (u) => !badUrls.has(u)
+      );
+      // First, clear any current selections for this product
+      chosen.forEach((u) =>
+        dispatch(
+          productsSlice.actions.toggleSelectImage({
+            id: rec.id,
+            url: u,
+            checked: false,
+          })
+        )
+      );
+      // Then, if checked, select all valid urls
+      if (checked) {
+        urls.forEach((u) =>
+          dispatch(
+            productsSlice.actions.toggleSelectImage({
+              id: rec.id,
+              url: u,
+              checked: true,
+            })
+          )
+        );
+      }
+    },
+    [dispatch, imagesById, selectedImagesById, badUrls]
+  );
   if (!productsState) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -1806,7 +1835,6 @@ export default function ProductsPage() {
       </div>
     );
   }
-
   return (
     <div className="py-6 space-y-6">
       {!acceptedInfo && (
@@ -1820,15 +1848,23 @@ export default function ProductsPage() {
               <Package className="h-16 w-16 text-primary/50 mx-auto mb-4" />
               <CSVReader
                 onUploadAccepted={(res, file) => onUpload(res, file)}
-                config={{ header: true, skipEmptyLines: true }}
+                config={{ header: true, skipEmptyLines: true, worker: true }}
               >
                 {({ getRootProps }) => (
                   <ActionButton
                     icon={Paperclip}
                     {...getRootProps()}
                     className="mx-auto"
+                    disabled={uploading}
                   >
-                    Upload CSV File
+                    {uploading ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                        Processing...
+                      </>
+                    ) : (
+                      "Upload CSV File"
+                    )}
                   </ActionButton>
                 )}
               </CSVReader>
@@ -1850,7 +1886,7 @@ export default function ProductsPage() {
                 <FileChip />
                 <CSVReader
                   onUploadAccepted={(res, file) => onUpload(res, file)}
-                  config={{ header: true, skipEmptyLines: true }}
+                  config={{ header: true, skipEmptyLines: true, worker: true }}
                 >
                   {({ getRootProps }) => (
                     <ActionButton
@@ -1858,8 +1894,16 @@ export default function ProductsPage() {
                       icon={FilePlus2}
                       variant="outline"
                       {...getRootProps()}
+                      disabled={uploading}
                     >
-                      Replace CSV
+                      {uploading ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                          Processing...
+                        </>
+                      ) : (
+                        "Replace CSV"
+                      )}
                     </ActionButton>
                   )}
                 </CSVReader>
@@ -2223,15 +2267,6 @@ export default function ProductsPage() {
                   )
                 }
                 selectedRowKeys={[...selected]}
-                onCellPrepared={(e) => {
-                  if (
-                    e.rowType === "header" &&
-                    e.column?.type === "selection"
-                  ) {
-                    e.cellElement.innerHTML = "";
-                    e.cellElement.style.pointerEvents = "none";
-                  }
-                }}
               >
                 <Selection
                   mode="multiple"
@@ -2337,8 +2372,7 @@ export default function ProductsPage() {
               </DataGrid>
             </div>
           </SectionCard>
-
-          {/* ✅ MODAL: Customize & Download Images — Full functionality preserved */}
+          {/* ✅ FIXED: Customize & Download Images Modal — product-level select/unselect now controls images */}
           <Dialog open={pickerOpen} onOpenChange={handlePickerOpenChange}>
             <DialogContent className="!max-w-6xl max-h-[100vh] max-sm:max-h-screen overflow-y-auto">
               <DialogHeader>
@@ -2348,7 +2382,7 @@ export default function ProductsPage() {
                   before downloading.
                 </DialogDescription>
               </DialogHeader>
-              {/* ✅ Header with Select All checkbox and Total Products */}
+              {/* Header with Select All Products */}
               <div className="mb-4 px-4">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2">
@@ -2359,9 +2393,22 @@ export default function ProductsPage() {
                       ref={(el) => {
                         if (el) el.indeterminate = someChecked && !allChecked;
                       }}
-                      onChange={(e) =>
-                        toggleAllProductsInModal(e.target.checked)
-                      }
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        // Update product IDs state
+                        if (checked) {
+                          const ids = new Set(
+                            productsWithImages.map((p) => p.id)
+                          );
+                          setModalSelectedProductIds(ids);
+                        } else {
+                          setModalSelectedProductIds(new Set());
+                        }
+                        // ✅ Also toggle images for every product accordingly
+                        productsWithImages.forEach((rec) =>
+                          toggleAllImagesForProduct(rec, checked)
+                        );
+                      }}
                       className="rounded"
                     />
                     <Label
@@ -2475,59 +2522,27 @@ export default function ProductsPage() {
                             Images: {urls.length} | Selected: {chosen.length}
                           </p>
                         </div>
+                        {/* ✅ Product-level checkbox now also selects/unselects ALL images inside */}
                         <div className="flex items-center space-x-2">
                           <input
                             type="checkbox"
                             id={`product-${rec.id}`}
                             checked={productChecked}
+                            ref={(el) => {
+                              if (el)
+                                el.indeterminate =
+                                  !productChecked && productSomeSelected;
+                            }}
                             onChange={(e) => {
-                              if (e.target.checked) {
-                                setModalSelectedProductIds((prev) =>
-                                  new Set(prev).add(rec.id)
-                                );
-                                // NEW: When a product is selected, also select all its images
-                                let countChange = 0;
-                                urls.forEach((u) => {
-                                  const alreadySelected = chosen.includes(u);
-                                  if (!alreadySelected) {
-                                    dispatch(
-                                      productsSlice.actions.toggleSelectImage({
-                                        id: rec.id,
-                                        url: u,
-                                        checked: true,
-                                      })
-                                    );
-                                    countChange++;
-                                  }
-                                });
-                                setSelectedImagesCount(
-                                  (prev) => prev + countChange
-                                );
-                              } else {
-                                setModalSelectedProductIds((prev) => {
-                                  const next = new Set(prev);
-                                  next.delete(rec.id);
-                                  return next;
-                                });
-                                // NEW: When a product is deselected, also deselect all its images
-                                let countChange = 0;
-                                urls.forEach((u) => {
-                                  const wasSelected = chosen.includes(u);
-                                  if (wasSelected) {
-                                    dispatch(
-                                      productsSlice.actions.toggleSelectImage({
-                                        id: rec.id,
-                                        url: u,
-                                        checked: false,
-                                      })
-                                    );
-                                    countChange++;
-                                  }
-                                });
-                                setSelectedImagesCount(
-                                  (prev) => prev - countChange
-                                );
-                              }
+                              const checked = e.target.checked;
+                              setModalSelectedProductIds((prev) => {
+                                const next = new Set(prev);
+                                if (checked) next.add(rec.id);
+                                else next.delete(rec.id);
+                                return next;
+                              });
+                              // ✅ Toggle all images for this product
+                              toggleAllImagesForProduct(rec, checked);
                             }}
                             className="rounded"
                           />
@@ -2566,27 +2581,33 @@ export default function ProductsPage() {
                                     : ""
                                 }`}
                                 title={u}
-                                onClick={() => {
-                                  if (!productChecked) return;
-                                  const newChecked = !checked;
-                                  dispatch(
-                                    productsSlice.actions.toggleSelectImage({
-                                      id: rec.id,
-                                      url: u,
-                                      checked: newChecked,
-                                    })
-                                  );
-                                  setSelectedImagesCount((prev) =>
-                                    newChecked ? prev + 1 : prev - 1
-                                  );
-                                }}
                               >
                                 <label
-                                  htmlFor={
-                                    productChecked ? checkboxId : undefined
-                                  }
+                                  htmlFor={checkboxId}
                                   className="aspect-square w-full bg-white rounded overflow-hidden"
-                                  onClick={(e) => e.stopPropagation()}
+                                  onClick={(e) => {
+                                    // ✅ If product wasn't included, auto-include it before toggling image
+                                    if (!productChecked) {
+                                      e.preventDefault();
+                                      setModalSelectedProductIds((prev) => {
+                                        const next = new Set(prev);
+                                        next.add(rec.id);
+                                        return next;
+                                      });
+                                      // Also make sure the image will toggle to checked on next tick
+                                      setTimeout(() => {
+                                        dispatch(
+                                          productsSlice.actions.toggleSelectImage(
+                                            {
+                                              id: rec.id,
+                                              url: u,
+                                              checked: true,
+                                            }
+                                          )
+                                        );
+                                      }, 0);
+                                    }
+                                  }}
                                 >
                                   <Image
                                     width={200}
@@ -2616,18 +2637,23 @@ export default function ProductsPage() {
                                     className="rounded"
                                     checked={checked}
                                     onChange={(e) => {
-                                      const isChecked = e.target.checked;
+                                      const willCheck = e.target.checked;
+                                      // ✅ Auto-include the product if user selects an image while product is off
+                                      if (willCheck && !productChecked) {
+                                        setModalSelectedProductIds((prev) => {
+                                          const next = new Set(prev);
+                                          next.add(rec.id);
+                                          return next;
+                                        });
+                                      }
                                       dispatch(
                                         productsSlice.actions.toggleSelectImage(
                                           {
                                             id: rec.id,
                                             url: u,
-                                            checked: isChecked,
+                                            checked: willCheck,
                                           }
                                         )
-                                      );
-                                      setSelectedImagesCount((prev) =>
-                                        isChecked ? prev + 1 : prev - 1
                                       );
                                     }}
                                     disabled={!productChecked}
@@ -2669,7 +2695,7 @@ export default function ProductsPage() {
                 <ActionButton
                   icon={DownloadIcon}
                   onClick={downloadSelectedImages}
-                  disabled={zipLoading || selectedImagesCount === 0}
+                  disabled={zipLoading || downloadSelections.length === 0}
                   variant="default"
                 >
                   {zipLoading ? (
@@ -2678,7 +2704,7 @@ export default function ProductsPage() {
                       Downloading...
                     </>
                   ) : (
-                    `Download (${selectedImagesCount} images)`
+                    `Download (${downloadSelections.length} images)`
                   )}
                 </ActionButton>
               </DialogFooter>
@@ -2695,7 +2721,6 @@ export default function ProductsPage() {
               )}
             </DialogContent>
           </Dialog>
-
           <Dialog open={previewOpen} onOpenChange={closePreview}>
             <DialogContent className="!max-w-6xl max-h-[100vh] max-sm:max-h-screen overflow-y-auto">
               <DialogHeader>
@@ -2856,7 +2881,6 @@ export default function ProductsPage() {
     </div>
   );
 }
-
 const WalletIcon = ({ className }) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
